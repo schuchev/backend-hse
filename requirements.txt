@@ -1,0 +1,9 @@
+fastapi
+fastapi[standard]
+pydantic
+scikit-learn
+numpy
+pytest
+pytest-asyncio
+mlflow
+python-dotenv

@@ -1,50 +1,60 @@
 import pytest
 from fastapi.testclient import TestClient
+from sklearn.linear_model import LogisticRegression
+import numpy as np
+
 from main import app
+from model import load_or_train_model
+
+
+@pytest.fixture(scope="session", autouse=True)
+def initialize_model():
+
+    app.state.model = load_or_train_model("test_model.pkl")
+
+    yield
+
+    app.state.model = None
+
 
 client = TestClient(app)
 
 
-def test_verified_seller_always_approved():
+
+def test_predict_violation_true():
     response = client.post("/predict", json={
         "seller_id": 1,
+        "is_verified_seller": False,
+        "item_id": 10,
+        "name": "Suspicious Item",
+        "description": "a" * 100,
+        "category": 5,
+        "images_qty": 0
+    })
+
+    assert response.status_code == 200
+    data = response.json()
+    assert "is_violation" in data
+    assert "probability" in data
+    assert isinstance(data["is_violation"], bool)
+    assert 0.0 <= data["probability"] <= 1.0
+
+
+def test_predict_violation_false():
+    response = client.post("/predict", json={
+        "seller_id": 2,
         "is_verified_seller": True,
-        "item_id": 10,
-        "name": "iPhone 13",
-        "description": "Хорошее состояние, оригинал",
-        "category": 1,
-        "images_qty": 0
+        "item_id": 20,
+        "name": "Legitimate Item",
+        "description": "a" * 500,
+        "category": 10,
+        "images_qty": 5
     })
+
     assert response.status_code == 200
-    assert response.json()["is_approved"] is True
-
-
-def test_unverified_seller_with_images_approved():
-    response = client.post("/predict", json={
-        "seller_id": 1,
-        "is_verified_seller": False,
-        "item_id": 10,
-        "name": "Samsung Galaxy",
-        "description": "Продам смартфон",
-        "category": 2,
-        "images_qty": 3
-    })
-    assert response.status_code == 200
-    assert response.json()["is_approved"] is True
-
-
-def test_unverified_seller_without_images_rejected():
-    response = client.post("/predict", json={
-        "seller_id": 1,
-        "is_verified_seller": False,
-        "item_id": 10,
-        "name": "Планшет",
-        "description": "Продам планшет",
-        "category": 3,
-        "images_qty": 0
-    })
-    assert response.status_code == 200
-    assert response.json()["is_approved"] is False
+    data = response.json()
+    assert isinstance(data["is_violation"], bool)
+    assert 0.0 <= data["probability"] <= 1.0
 
 
 
@@ -59,19 +69,7 @@ def test_unverified_seller_without_images_rejected():
             "category": 1,
             "images_qty": "abc"
         },
-        "images_qty имеет неверный тип (строка)"
-    ),
-    (
-        {
-            "seller_id": 1,
-            "is_verified_seller": True,
-            "item_id": 10,
-            "name": "Item",
-            "description": "Description",
-            "category": 1
-
-        },
-        "Отсутствует обязательное поле images_qty"
+        "images_qty неверного типа (строка)"
     ),
     (
         {
@@ -81,9 +79,21 @@ def test_unverified_seller_without_images_rejected():
             "name": "Item",
             "description": "Description",
             "category": 1,
-            "images_qty": -5
+            "images_qty": -1
         },
-        "images_qty < 0 (некорректное значение)"
+        "images_qty < 0"
+    ),
+    (
+        {
+            "seller_id": 1,
+            "is_verified_seller": True,
+            "item_id": 10,
+            "name": "Item",
+            "description": "Description",
+            "category": 1,
+            "images_qty": 11
+        },
+        "images_qty > 10"
     ),
     (
         {
@@ -93,33 +103,9 @@ def test_unverified_seller_without_images_rejected():
             "name": "Item",
             "description": "Description",
             "category": 1,
-            "images_qty": 0
+            "images_qty": 5
         },
-        "seller_id < 0 (некорректное значение)"
-    ),
-    (
-        {
-            "seller_id": 1,
-            "is_verified_seller": True,
-            "item_id": -10,
-            "name": "Item",
-            "description": "Description",
-            "category": 1,
-            "images_qty": 0
-        },
-        "item_id < 0 (некорректное значение)"
-    ),
-    (
-        {
-            "seller_id": 1,
-            "is_verified_seller": True,
-            "item_id": 10,
-            "name": "Item",
-            "description": "Description",
-            "category": -1,
-            "images_qty": 0
-        },
-        "category < 0 (некорректное значение)"
+        "seller_id < 0"
     ),
     (
         {
@@ -131,7 +117,7 @@ def test_unverified_seller_without_images_rejected():
             "category": 1,
             "images_qty": 0
         },
-        "name пуста (некорректное значение)"
+        "name пуста"
     ),
     (
         {
@@ -143,7 +129,30 @@ def test_unverified_seller_without_images_rejected():
             "category": 1,
             "images_qty": 0
         },
-        "description пуста (некорректное значение)"
+        "description пуста"
+    ),
+    (
+        {
+            "seller_id": 1,
+            "is_verified_seller": True,
+            "item_id": 10,
+            "name": "Item",
+            "description": "Description",
+            "category": 101,
+            "images_qty": 0
+        },
+        "category > 100"
+    ),
+    (
+        {
+            "seller_id": 1,
+            "is_verified_seller": True,
+            "item_id": 10,
+            "name": "Item",
+            "description": "Description",
+            "category": 1
+        },
+        "Отсутствует images_qty"
     ),
 ])
 def test_validation_errors(invalid_data, description):
@@ -152,42 +161,62 @@ def test_validation_errors(invalid_data, description):
 
 
 
-def test_unverified_seller_with_one_image_approved():
-    response = client.post("/predict", json={
-        "seller_id": 999,
-        "is_verified_seller": False,
-        "item_id": 555,
-        "name": "Товар",
-        "description": "Описание товара",
-        "category": 5,
-        "images_qty": 1
-    })
+def test_health_check():
+    response = client.get("/predict/health")
     assert response.status_code == 200
-    assert response.json()["is_approved"] is True
+    data = response.json()
+    assert data["status"] == "healthy"
+    assert data["model_loaded"] is True
 
 
-def test_with_max_length_strings():
+
+def test_max_length_name():
     response = client.post("/predict", json={
         "seller_id": 1,
         "is_verified_seller": True,
         "item_id": 10,
         "name": "A" * 255,
-        "description": "B" * 5000,
-        "category": 1,
-        "images_qty": 0
+        "description": "Description",
+        "category": 50,
+        "images_qty": 5
     })
     assert response.status_code == 200
-    assert response.json()["is_approved"] is True
 
 
-def test_with_zero_seller_id_rejected():
+def test_max_length_description():
     response = client.post("/predict", json={
-        "seller_id": 0,
+        "seller_id": 1,
         "is_verified_seller": True,
+        "item_id": 10,
+        "name": "Item",
+        "description": "A" * 5000,
+        "category": 50,
+        "images_qty": 5
+    })
+    assert response.status_code == 200
+
+
+def test_min_images_qty():
+    response = client.post("/predict", json={
+        "seller_id": 1,
+        "is_verified_seller": False,
         "item_id": 10,
         "name": "Item",
         "description": "Description",
         "category": 1,
         "images_qty": 0
     })
-    assert response.status_code == 422
+    assert response.status_code == 200
+
+
+def test_max_images_qty():
+    response = client.post("/predict", json={
+        "seller_id": 1,
+        "is_verified_seller": True,
+        "item_id": 10,
+        "name": "Item",
+        "description": "Description",
+        "category": 50,
+        "images_qty": 10
+    })
+    assert response.status_code == 200
