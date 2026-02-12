@@ -1,66 +1,52 @@
 import logging
-from sklearn.linear_model import LogisticRegression
+
+from fastapi import HTTPException
 from schemas.predict import PredictRequest, PredictResponse
+from ml.predictor import ModerationPredictor
+from repositories.items import ItemRepository
 
 logger = logging.getLogger(__name__)
 
+THRESHOLD = 0.5
 
-def normalize_features(request: PredictRequest) -> list[float]:
+def predict_violation(request: PredictRequest) -> PredictResponse:
     """
-    Преобразует входные данные в признаки для модели.
-
-    Нормализация:
-    - is_verified_seller: bool -> 1.0 или 0.0
-    - images_qty: деление на 10
-    - description_length: нормализуем делением на 1000
-    - category:  деление на 100
-
+    Предсказание по полным данным (старый эндпоинт /predict).
     """
-    is_verified = float(request.is_verified_seller)
-    images_normalized = request.images_qty / 10.0
-    description_length_normalized = len(request.description) / 1000.0
-    category_normalized = request.category / 100.0
+    proba = ModerationPredictor.instance().predict_proba_violation(request)
+    is_violation = proba >= THRESHOLD
 
-    features = [
-        is_verified,
-        images_normalized,
-        description_length_normalized,
-        category_normalized
-    ]
-
-
-    return features
-
-
-def predict_violation(request: PredictRequest,model: LogisticRegression) -> PredictResponse:
-    """
-    Предсказывает, есть ли нарушение в объявлении.
-
-    """
-    if model is None:
-        raise ValueError("Model is not available")
-
-    features = normalize_features(request)
-
-    features_array = [[f for f in features]]
-
-    prediction = int(model.predict(features_array)[0])
-    probabilities = model.predict_proba(features_array)[0]
-
-    probability = float(probabilities[1])
-
-    response = PredictResponse(
-        is_violation=bool(prediction),
-        probability=probability
-    )
+    response = PredictResponse(is_violation=is_violation, probability=proba)
 
     logger.info(
-        "Prediction for seller_id=%d, item_id=%d: "
-        "is_violation=%s, probability=%.4f",
+        "Prediction for seller_id=%d, item_id=%d: is_violation=%s, probability=%.4f",
         request.seller_id,
         request.item_id,
         response.is_violation,
-        response.probability
+        response.probability,
+    )
+    return response
+
+
+async def simple_predict_violation(item_id: int) -> PredictResponse:
+    """
+    новый эндпоинт /simple_predict
+
+    Получает данные из БД и делает предсказание
+    """
+    item_data = await ItemRepository.get_item_with_user(item_id)
+
+    if not item_data:
+        raise HTTPException(status_code=404, detail=f"Item {item_id} not found")
+
+    request = PredictRequest(
+        seller_id=item_data["user_id"],
+        is_verified_seller=item_data["is_verified"],
+        item_id=item_data["id"],
+        name=item_data["name"],
+        description=item_data["description"],
+        category=item_data["category"],
+        images_qty=item_data["images_qty"]
     )
 
-    return response
+    return predict_violation(request)

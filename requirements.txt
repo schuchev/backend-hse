@@ -7,3 +7,6 @@ pytest
 pytest-asyncio
 mlflow
 python-dotenv
+asyncpg
+psycopg2-binary
+yandex-pgmigrate
