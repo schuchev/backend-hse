@@ -46,3 +46,4 @@ class PredictResponse(BaseModel):
         le=1.0,
         description="Вероятность нарушения (0-1)"
     )
+

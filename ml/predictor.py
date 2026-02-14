@@ -15,7 +15,6 @@ class ModelNotAvailableError(RuntimeError):
 
 
 class ModerationPredictor:
-
     _instance: Optional["ModerationPredictor"] = None
 
     def __init__(self, model: LogisticRegression):
@@ -50,9 +49,33 @@ class ModerationPredictor:
         ]
 
     def predict_proba_violation(self, request: PredictRequest) -> float:
-
         features = self._normalize_features(request)
         x = [features]
-
         proba = float(self._model.predict_proba(x)[0][1])
         return proba
+
+    @classmethod
+    def predict(
+        cls,
+        *,
+        seller_id: int,
+        is_verified_seller: bool,
+        item_id: int,
+        name: str,
+        description: str,
+        category: int,
+        images_qty: int,
+        threshold: float = 0.5,
+    ) -> tuple[bool, float]:
+
+        request = PredictRequest(
+            seller_id=seller_id,
+            is_verified_seller=is_verified_seller,
+            item_id=item_id,
+            name=name,
+            description=description,
+            category=category,
+            images_qty=images_qty,
+        )
+        proba = cls.instance().predict_proba_violation(request)
+        return (proba >= threshold), proba

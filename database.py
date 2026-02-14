@@ -28,3 +28,7 @@ async def get_db_connection() -> AsyncGenerator[asyncpg.Connection, None]:
     assert _pool is not None, "DB pool is not initialized"
     async with _pool.acquire() as conn:
         yield conn
+
+def get_pool() -> asyncpg.Pool:
+    assert _pool is not None, "DB pool is not initialized"
+    return _pool
