@@ -11,6 +11,8 @@ from database import init_db, close_db, get_db_connection
 from model import load_model_smart
 from ml.predictor import ModerationPredictor
 
+from repositories.items import ItemRepository
+from repositories.moderation_results import ModerationResultRepository
 
 logger = logging.getLogger("moderation_worker")
 logging.basicConfig(level=logging.INFO)
@@ -46,71 +48,19 @@ async def send_to_dlq(
     await dlq_producer.send_and_wait(DLQ_TOPIC, data)
 
 
-async def mark_failed(task_id: int, error_message: str) -> None:
-    async with get_db_connection() as conn:
-        await conn.execute(
-            """
-            UPDATE moderation_results
-            SET status = 'failed',
-                error_message = $2,
-                processed_at = now()
-            WHERE id = $1
-            """,
-            task_id,
-            error_message,
-        )
-
-
-async def find_latest_pending_task_id(item_id: int) -> Optional[int]:
-    async with get_db_connection() as conn:
-        return await conn.fetchval(
-            """
-            SELECT id
-            FROM moderation_results
-            WHERE item_id = $1 AND status = 'pending'
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            item_id,
-        )
-
 
 async def process_one(item_id: int, dlq_producer: AIOKafkaProducer, original_message: Any) -> None:
-    async with get_db_connection() as conn:
-        row = await conn.fetchrow(
-            """
-            SELECT
-                i.id,
-                i.user_id,
-                i.name,
-                i.description,
-                i.category,
-                i.images_qty,
-                u.is_verified
-            FROM items i
-            JOIN users u ON u.id = i.user_id
-            WHERE i.id = $1
-            """,
-            item_id,
-        )
 
-        task_id = await conn.fetchval(
-            """
-            SELECT id
-            FROM moderation_results
-            WHERE item_id = $1 AND status = 'pending'
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            item_id,
-        )
+    row = await ItemRepository.get_item_with_user(item_id)
+
+    task_id = await ModerationResultRepository.get_latest_pending_task(item_id)
 
     if task_id is None:
         return
 
     if row is None:
         err = f"Item {item_id} not found"
-        await mark_failed(task_id, err)
+        await ModerationResultRepository.mark_failed(task_id, err)
         await send_to_dlq(dlq_producer, original_message, err, retry_count=1)
         return
 
@@ -128,20 +78,11 @@ async def process_one(item_id: int, dlq_producer: AIOKafkaProducer, original_mes
     except Exception as e:
         raise RetryableMLError(str(e)) from e
 
-    async with get_db_connection() as conn:
-        await conn.execute(
-            """
-            UPDATE moderation_results
-            SET status = 'completed',
-                is_violation = $2,
-                probability = $3,
-                processed_at = now()
-            WHERE id = $1
-            """,
-            task_id,
-            bool(is_violation),
-            float(probability),
-        )
+    await ModerationResultRepository.mark_completed(
+        task_id,
+        bool(is_violation),
+        float(probability),
+    )
 
 
 async def main() -> None:
@@ -199,9 +140,9 @@ async def main() -> None:
                         err = f"ML error after {attempt} attempts: {e}"
                         logger.exception(err)
 
-                        task_id = await find_latest_pending_task_id(item_id)
+                        task_id = await ModerationResultRepository.get_latest_pending_task(item_id)
                         if task_id is not None:
-                            await mark_failed(task_id, err)
+                            await ModerationResultRepository.mark_failed(task_id, err)
 
                         await send_to_dlq(dlq_producer, original_message, err, retry_count=attempt)
                         break
@@ -210,9 +151,9 @@ async def main() -> None:
                         err = f"Unexpected error: {e}"
                         logger.exception(err)
 
-                        task_id = await find_latest_pending_task_id(item_id)
+                        task_id = await ModerationResultRepository.get_latest_pending_task(item_id)
                         if task_id is not None:
-                            await mark_failed(task_id, err)
+                            await ModerationResultRepository.mark_failed(task_id, err)
 
                         await send_to_dlq(dlq_producer, original_message, err, retry_count=1)
                         break

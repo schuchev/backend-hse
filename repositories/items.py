@@ -43,3 +43,13 @@ class ItemRepository:
                 item_id,
             )
             return dict(row) if row else None
+
+
+@staticmethod
+async def close_item(item_id: int) -> bool:
+    async with get_db_connection() as conn:
+        result = await conn.execute(
+            "UPDATE items SET is_closed = TRUE WHERE id = $1",
+            item_id
+        )
+        return result.split()[1] == '1'

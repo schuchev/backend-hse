@@ -10,3 +10,5 @@ python-dotenv
 asyncpg
 psycopg2-binary
 yandex-pgmigrate
+redis
+aiokafka

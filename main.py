@@ -15,6 +15,12 @@ from model import load_model_smart
 from routes.predict import router as predict_router
 from routes.async_predict import router as async_predict_router
 from routes.moderation_result import router as moderation_result_router
+from app.clients.redis import create_redis_pool
+from redis.asyncio import Redis
+from app.storage.prediction_storage import PredictionRedisStorage
+from routes.close import router as close_router
+
+from app.storage.moderation_result_storage import ModerationResultRedisStorage
 
 load_dotenv()
 
@@ -62,9 +68,17 @@ async def lifespan(app: FastAPI):
     app.state.kafka_producer = KafkaProducerAdapter(kafka_producer)
     logger.info("Kafka producer started (%s)", KAFKA_BOOTSTRAP)
 
+    redis_pool = create_redis_pool()
+    app.state.redis_client = Redis(connection_pool=redis_pool)
+    logger.info("Redis client initialized")
+    app.state.prediction_storage = PredictionRedisStorage()
+    app.state.moderation_result_storage = ModerationResultRedisStorage()
+
     yield
 
     logger.info("Shutting down application...")
+    await app.state.redis_client.close()
+    await redis_pool.disconnect()
     await kafka_producer.stop()
     ModerationPredictor.reset()
     await close_db()
@@ -97,7 +111,7 @@ async def root():
 app.include_router(predict_router)
 app.include_router(async_predict_router)
 app.include_router(moderation_result_router)
-
+app.include_router(close_router)
 
 if __name__ == "__main__":
     import uvicorn

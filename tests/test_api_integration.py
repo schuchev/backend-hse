@@ -1,14 +1,16 @@
-import json
-
 import pytest
+import json
 from httpx import AsyncClient
 from contextlib import asynccontextmanager
 from repositories.users import UserRepository
 from repositories.items import ItemRepository
-from database import get_db_connection
-from ml.predictor import ModerationPredictor
-
+from repositories.moderation_results import ModerationResultRepository
 from app.workers.moderation_worker import process_one, DLQ_TOPIC
+from app.storage.prediction_storage import PredictionRedisStorage
+from app.storage.moderation_result_storage import ModerationResultRedisStorage
+from app.clients.redis import get_redis_connection
+
+pytestmark = pytest.mark.integration
 
 
 class FakeDLQProducer:
@@ -33,7 +35,6 @@ async def test_predict_violation_true(client: AsyncClient):
             "images_qty": 0,
         },
     )
-
     assert response.status_code == 200
     data = response.json()
     assert "is_violation" in data
@@ -56,7 +57,6 @@ async def test_predict_violation_false(client: AsyncClient):
             "images_qty": 5,
         },
     )
-
     assert response.status_code == 200
     data = response.json()
     assert isinstance(data["is_violation"], bool)
@@ -266,10 +266,11 @@ async def test_worker_process_one_completes_task(monkeypatch, client: AsyncClien
     def fake_predict(**kwargs):
         return False, 0.12
 
-    monkeypatch.setattr(mw.ModerationPredictor, "predict", fake_predict, raising=False)  # важно [web:618]
+    monkeypatch.setattr(mw.ModerationPredictor, "predict", fake_predict, raising=False) 
 
     dlq = FakeDLQProducer()
-    await mw.process_one(item_id=item_id, dlq_producer=dlq, original_message={"item_id": item_id})
+    await 
+    mw.process_one(item_id=item_id, dlq_producer=dlq, original_message={"item_id": item_id})
 
     status_resp = await client.get(f"/moderation_result/{task_id}")
     assert status_resp.status_code == 200
