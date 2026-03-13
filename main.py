@@ -22,6 +22,9 @@ from routes.close import router as close_router
 
 from app.storage.moderation_result_storage import ModerationResultRedisStorage
 
+from prometheus_fastapi_instrumentator import Instrumentator
+
+
 load_dotenv()
 
 logging.basicConfig(
@@ -85,6 +88,7 @@ async def lifespan(app: FastAPI):
     logger.info("Database pool closed")
 
 
+
 app = FastAPI(
     title="Moderation Service",
     description="API для модерации объявлений с ML моделью и PostgreSQL",
@@ -92,6 +96,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+Instrumentator().instrument(app).expose(app)
 
 @app.exception_handler(ModelNotAvailableError)
 async def model_not_available_handler(request: Request, exc: ModelNotAvailableError):
