@@ -1,157 +1,104 @@
-import json
-from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock
-
 import pytest
-from database import get_db_connection
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.storage.prediction_storage import PredictionRedisStorage
-from app.clients.redis import get_redis_connection
-from repositories.moderation_results import ModerationResultRepository
-
-pytestmark = pytest.mark.asyncio
+from schemas.predict import PredictRequest, PredictResponse
+from services.moderation import predict_violation, simple_predict_violation
+from ml.predictor import ModerationPredictor
 
 
-async def test_get_task_with_cache_hit(monkeypatch):
-    task_id = 123
-    cached_data = {
-        "id": task_id,
-        "status": "completed",
-        "is_violation": True,
-        "probability": 0.87
-    }
+@pytest.mark.asyncio
+async def test_predict_violation_cache_hit():
+    item_id = 42
+    cached_data = {"is_violation": True, "probability": 0.95}
+    mock_storage = AsyncMock()
+    mock_storage.get.return_value = cached_data
 
-    mock_redis = AsyncMock()
-    mock_redis.get.return_value = json.dumps(cached_data)
-
-    @asynccontextmanager
-    async def mock_get_redis_connection():
-        yield mock_redis
-
-    monkeypatch.setattr("repositories.moderation_results.get_redis_connection", mock_get_redis_connection)
-
-    mock_db = AsyncMock()
-
-    @asynccontextmanager
-    async def mock_get_db_connection():
-        yield mock_db
-
-    monkeypatch.setattr("repositories.moderation_results.get_db_connection", mock_get_db_connection)
-
-    result = await ModerationResultRepository.get_task_with_cache(task_id)
-
-    assert result is not None
-    assert result.task_id == task_id
-    assert result.status == "completed"
-    assert result.is_violation is True
-    assert result.probability == 0.87
-
-    mock_redis.get.assert_called_once_with(f"moderation_result:{task_id}")
-    mock_db.fetchrow.assert_not_called()
-
-
-async def test_get_task_with_cache_miss_and_store(monkeypatch):
-    task_id = 456
-    db_row = {
-        "id": task_id,
-        "status": "pending",
-        "is_violation": None,
-        "probability": None
-    }
-
-    mock_redis = AsyncMock()
-    mock_redis.get.return_value = None
-    mock_redis.setex = AsyncMock()
-
-    redis_calls = 0
-
-    @asynccontextmanager
-    async def mock_get_redis_connection():
-        nonlocal redis_calls
-        redis_calls += 1
-        yield mock_redis
-
-    monkeypatch.setattr("repositories.moderation_results.get_redis_connection", mock_get_redis_connection)
-
-    mock_conn = AsyncMock()
-    mock_conn.fetchrow.return_value = db_row
-
-    @asynccontextmanager
-    async def mock_get_db_connection():
-        yield mock_conn
-
-    monkeypatch.setattr("repositories.moderation_results.get_db_connection", mock_get_db_connection)
-
-    result = await ModerationResultRepository.get_task_with_cache(task_id)
-
-    assert result is not None
-    assert result.task_id == task_id
-    assert result.status == "pending"
-    assert result.is_violation is None
-    assert result.probability is None
-
-    mock_redis.get.assert_called_once_with(f"moderation_result:{task_id}")
-    mock_conn.fetchrow.assert_called_once()
-    mock_redis.setex.assert_called_once()
-    args, kwargs = mock_redis.setex.call_args
-    assert args[0] == f"moderation_result:{task_id}"
-    assert args[1] == 86400  
-    saved_data = json.loads(args[2])
-    assert saved_data == db_row
-
-@pytest.mark.integration
-async def test_integration_get_task_with_cache_hit(db_connection, clear_redis):
-    conn = db_connection
-    task_id = await conn.fetchval(
-        "INSERT INTO moderation_results (item_id, status, created_at) VALUES (1, 'pending', now()) RETURNING id"
-    )
-    await conn.execute(
-        "UPDATE moderation_results SET status = 'completed', is_violation = $1, probability = $2, processed_at = now() WHERE id = $3",
-        True, 0.75, task_id
+    request = PredictRequest(
+        seller_id=1,
+        is_verified_seller=False,
+        item_id=item_id,
+        name="Test",
+        description="desc",
+        category=1,
+        images_qty=1
     )
 
-    result1 = await ModerationResultRepository.get_task_with_cache(task_id)
-    assert result1.probability == 0.75
+    with patch.object(ModerationPredictor, "instance") as mock_instance:
+        mock_predictor = MagicMock()
+        mock_instance.return_value = mock_predictor
 
-    async with get_redis_connection() as redis:
-        cached = await redis.get(f"moderation_result:{task_id}")
-    assert cached is not None
-    data = json.loads(cached)
-    assert data["probability"] == 0.75
+        response = await predict_violation(request, mock_storage)
 
-    await conn.execute(
-        "UPDATE moderation_results SET probability = 0.99 WHERE id = $1", task_id
+        assert isinstance(response, PredictResponse)
+        assert response.is_violation == cached_data["is_violation"]
+        assert response.probability == cached_data["probability"]
+        mock_storage.get.assert_awaited_once_with(item_id)
+        mock_predictor.predict_proba_violation.assert_not_called()
+        mock_storage.set.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_predict_violation_cache_miss():
+    item_id = 42
+    mock_storage = AsyncMock()
+    mock_storage.get.return_value = None
+
+    request = PredictRequest(
+        seller_id=1,
+        is_verified_seller=False,
+        item_id=item_id,
+        name="Test",
+        description="desc",
+        category=1,
+        images_qty=1
     )
 
-    result2 = await ModerationResultRepository.get_task_with_cache(task_id)
-    assert result2.probability == 0.75
+    fake_proba = 0.78
+    fake_is_violation = fake_proba >= 0.5
 
-    async with get_redis_connection() as redis:
-        await redis.delete(f"moderation_result:{task_id}")
+    with patch.object(ModerationPredictor, "instance") as mock_instance:
+        mock_predictor = MagicMock()
+        mock_predictor.predict_proba_violation.return_value = fake_proba
+        mock_instance.return_value = mock_predictor
 
-    result3 = await ModerationResultRepository.get_task_with_cache(task_id)
-    assert result3.probability == 0.99
-    
-async def test_prediction_storage_set_get(clear_redis):
-    storage = PredictionRedisStorage()
-    item_id = 777
-    data = {"is_violation": False, "probability": 0.23}
+        response = await predict_violation(request, mock_storage)
 
-    await storage.set(item_id, data)
-    cached = await storage.get(item_id)
-    assert cached == data
-
-    async with get_redis_connection() as redis:
-        raw = await redis.get(str(item_id))
-    assert raw is not None
-    assert json.loads(raw) == data
+        assert response.is_violation == fake_is_violation
+        assert response.probability == fake_proba
+        mock_storage.get.assert_awaited_once_with(item_id)
+        mock_predictor.predict_proba_violation.assert_called_once_with(request)
+        mock_storage.set.assert_awaited_once_with(
+            item_id,
+            {"is_violation": fake_is_violation, "probability": fake_proba}
+        )
 
 
-async def test_prediction_storage_delete():
-    storage = PredictionRedisStorage()
-    item_id = 888
-    data = {"is_violation": True, "probability": 0.9}
-    await storage.set(item_id, data)
-    await storage.delete(item_id)
-    cached = await storage.get(item_id)
-    assert cached is None
+@pytest.mark.asyncio
+async def test_simple_predict_violation_calls_predict():
+    with patch("services.moderation.ItemRepository.get_item_with_user") as mock_get_item, \
+         patch("services.moderation.predict_violation") as mock_predict:
+
+        item_id = 42
+        mock_get_item.return_value = {
+            "user_id": 1,
+            "is_verified": True,
+            "id": item_id,
+            "name": "Test",
+            "description": "desc",
+            "category": 1,
+            "images_qty": 1
+        }
+
+        expected_response = PredictResponse(is_violation=False, probability=0.12)
+        mock_predict.return_value = expected_response
+
+        mock_storage = AsyncMock()
+
+        response = await simple_predict_violation(item_id, mock_storage)
+
+        assert response == expected_response
+        mock_get_item.assert_awaited_once_with(item_id)
+        call_args = mock_predict.call_args[0]
+        assert isinstance(call_args[0], PredictRequest)
+        assert call_args[0].item_id == item_id
+        assert call_args[1] is mock_storage

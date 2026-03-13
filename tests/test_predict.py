@@ -1,16 +1,13 @@
-import pytest
 import json
+import pytest
 from httpx import AsyncClient
 from contextlib import asynccontextmanager
+
 from repositories.users import UserRepository
 from repositories.items import ItemRepository
-from repositories.moderation_results import ModerationResultRepository
+from database import get_db_connection
+from ml.predictor import ModerationPredictor
 from app.workers.moderation_worker import process_one, DLQ_TOPIC
-from app.storage.prediction_storage import PredictionRedisStorage
-from app.storage.moderation_result_storage import ModerationResultRedisStorage
-from app.clients.redis import get_redis_connection
-
-pytestmark = pytest.mark.integration
 
 
 class FakeDLQProducer:
@@ -119,8 +116,9 @@ async def test_health_check(client: AsyncClient):
     assert data["model_loaded"] is True
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
-async def test_create_user():
+async def test_create_user(db_connection):
     user_id = await UserRepository.create_user(is_verified=True)
     assert user_id is not None
     assert user_id > 0
@@ -130,8 +128,9 @@ async def test_create_user():
     assert user["is_verified"] is True
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
-async def test_create_item():
+async def test_create_item(db_connection):
     user_id = await UserRepository.create_user(is_verified=False)
 
     item_id = await ItemRepository.create_item(
@@ -152,10 +151,10 @@ async def test_create_item():
     assert item["is_verified"] is False
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
-async def test_simple_predict_positive(client: AsyncClient):
+async def test_simple_predict_positive(client: AsyncClient, db_connection):
     user_id = await UserRepository.create_user(is_verified=False)
-
     item_id = await ItemRepository.create_item(
         user_id=user_id,
         name="Suspicious",
@@ -165,7 +164,6 @@ async def test_simple_predict_positive(client: AsyncClient):
     )
 
     response = await client.post(f"/predict/simple_predict?item_id={item_id}")
-
     assert response.status_code == 200
     data = response.json()
     assert "is_violation" in data
@@ -174,10 +172,10 @@ async def test_simple_predict_positive(client: AsyncClient):
     assert 0.0 <= data["probability"] <= 1.0
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
-async def test_simple_predict_negative(client: AsyncClient):
+async def test_simple_predict_negative(client: AsyncClient, db_connection):
     user_id = await UserRepository.create_user(is_verified=True)
-
     item_id = await ItemRepository.create_item(
         user_id=user_id,
         name="Good Item",
@@ -187,22 +185,23 @@ async def test_simple_predict_negative(client: AsyncClient):
     )
 
     response = await client.post(f"/predict/simple_predict?item_id={item_id}")
-
     assert response.status_code == 200
     data = response.json()
     assert isinstance(data["is_violation"], bool)
     assert 0.0 <= data["probability"] <= 1.0
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
-async def test_simple_predict_not_found(client: AsyncClient):
+async def test_simple_predict_not_found(client: AsyncClient, db_connection):
     response = await client.post("/predict/simple_predict?item_id=999999")
     assert response.status_code == 404
     assert "not found" in response.json()["detail"].lower()
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
-async def test_async_predict_creates_task_and_sends_message(client: AsyncClient, fake_kafka_producer):
+async def test_async_predict_creates_task_and_sends_message(client: AsyncClient, fake_kafka_producer, db_connection):
     user_id = await UserRepository.create_user(is_verified=False)
     item_id = await ItemRepository.create_item(
         user_id=user_id,
@@ -219,12 +218,12 @@ async def test_async_predict_creates_task_and_sends_message(client: AsyncClient,
     assert isinstance(data["task_id"], int)
     assert data["task_id"] > 0
     assert data["status"] == "pending"
-
     assert fake_kafka_producer.sent_item_ids == [item_id]
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
-async def test_moderation_result_by_task_id(client: AsyncClient):
+async def test_moderation_result_by_task_id(client: AsyncClient, db_connection):
     user_id = await UserRepository.create_user(is_verified=False)
     item_id = await ItemRepository.create_item(
         user_id=user_id,
@@ -247,8 +246,9 @@ async def test_moderation_result_by_task_id(client: AsyncClient):
     assert row["probability"] is None
 
 
+@pytest.mark.integration
 @pytest.mark.asyncio
-async def test_worker_process_one_completes_task(monkeypatch, client: AsyncClient):
+async def test_worker_process_one_completes_task(monkeypatch, client: AsyncClient, db_connection):
     user_id = await UserRepository.create_user(is_verified=True)
     item_id = await ItemRepository.create_item(
         user_id=user_id,
@@ -266,11 +266,10 @@ async def test_worker_process_one_completes_task(monkeypatch, client: AsyncClien
     def fake_predict(**kwargs):
         return False, 0.12
 
-    monkeypatch.setattr(mw.ModerationPredictor, "predict", fake_predict, raising=False) 
+    monkeypatch.setattr(mw.ModerationPredictor, "predict", fake_predict, raising=False)
 
     dlq = FakeDLQProducer()
-    await 
-    mw.process_one(item_id=item_id, dlq_producer=dlq, original_message={"item_id": item_id})
+    await mw.process_one(item_id=item_id, dlq_producer=dlq, original_message={"item_id": item_id})
 
     status_resp = await client.get(f"/moderation_result/{task_id}")
     assert status_resp.status_code == 200
@@ -281,44 +280,38 @@ async def test_worker_process_one_completes_task(monkeypatch, client: AsyncClien
     assert 0.0 <= float(row["probability"]) <= 1.0
     assert dlq.sent == []
 
-import json
 
 @pytest.mark.asyncio
 async def test_worker_sends_to_dlq_on_missing_item(monkeypatch):
     import app.workers.moderation_worker as mw
+    from repositories.items import ItemRepository
+    from repositories.moderation_results import ModerationResultRepository
 
-    class FakeConn:
-        def __init__(self):
-            self.exec_calls = []
+    async def mock_get_item_with_user(item_id):
+        return None
+    monkeypatch.setattr(ItemRepository, "get_item_with_user", mock_get_item_with_user)
 
-        async def fetchrow(self, query, *args):
-            return None
+    async def mock_get_latest_pending_task(item_id):
+        return 12345
+    monkeypatch.setattr(ModerationResultRepository, "get_latest_pending_task", mock_get_latest_pending_task)
 
-        async def fetchval(self, query, *args):
-            return 12345
-
-        async def execute(self, query, *args):
-            self.exec_calls.append((query, args))
-
-    fake_conn = FakeConn()
-
-    @asynccontextmanager
-    async def fake_get_db_connection():
-        yield fake_conn
-
-    monkeypatch.setattr(mw, "get_db_connection", fake_get_db_connection)
+    mark_failed_called = False
+    async def mock_mark_failed(task_id, error_message):
+        nonlocal mark_failed_called
+        mark_failed_called = True
+        assert task_id == 12345
+        assert "not found" in error_message.lower()
+    monkeypatch.setattr(ModerationResultRepository, "mark_failed", mock_mark_failed)
 
     dlq = FakeDLQProducer()
     await mw.process_one(item_id=999, dlq_producer=dlq, original_message={"item_id": 999})
 
+    assert mark_failed_called
     assert len(dlq.sent) == 1
     topic, raw = dlq.sent[0]
     assert topic == mw.DLQ_TOPIC
-
     payload = json.loads(raw.decode("utf-8"))
     assert payload["original_message"]["item_id"] == 999
     assert "not found" in payload["error"].lower()
     assert "timestamp" in payload
     assert payload["retry_count"] == 1
-
-    assert any("UPDATE moderation_results" in q for q, _ in fake_conn.exec_calls)

@@ -38,7 +38,10 @@ async def get_redis_connection():
         await conn.aclose() 
         
 def create_redis_pool():
-    init_redis_pool()
+    global _pool
+    if _pool is None:
+        init_redis_pool()
+    return _pool
     
 async def flushall():
     async with get_redis_connection() as conn:
