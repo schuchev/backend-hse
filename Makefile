@@ -14,3 +14,11 @@ worker:
 
 test:
 	python -m pytest -vv
+
+test-unit:
+	python -m pytest -m "not integration" -vv
+
+test-integration:
+	python -m pytest -m integration -vv
+
+
