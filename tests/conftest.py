@@ -130,7 +130,7 @@ async def setup_database():
     await run_migrations()
 
 
-@pytest_asyncio.fixture(scope="function")
+@pytest_asyncio.fixture(scope="function",autouse=True)
 async def initialize_database(setup_database):
     await init_db()
     yield
@@ -179,12 +179,14 @@ async def patch_app_state(fake_kafka_producer: FakeKafkaProducer, monkeypatch):
     import app.clients.redis as redis_module
     import repositories.moderation_results
     import app.storage.prediction_storage
-
+    import app.storage.account_storage 
+    
     fake_conn = fake_redis_connection
 
     monkeypatch.setattr(redis_module, "get_redis_connection", fake_conn)
     monkeypatch.setattr(repositories.moderation_results, "get_redis_connection", fake_conn)
     monkeypatch.setattr(app.storage.prediction_storage, "get_redis_connection", fake_conn)
+    monkeypatch.setattr(app.storage.account_storage, "get_redis_connection", fake_conn)
 
     yield
 
@@ -194,3 +196,12 @@ async def client():
     transport = httpx.ASGITransport(app=fastapi_app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
+        
+        
+@pytest_asyncio.fixture
+async def auth_client(client: AsyncClient):
+    await client.post("/auth/register", json={"login": "authuser", "password": "pass"})
+    login_resp = await client.post("/auth/login", json={"login": "authuser", "password": "pass"})
+    token = login_resp.json()["access_token"]
+    client.headers.update({"Authorization": f"Bearer {token}"})
+    yield client

@@ -19,7 +19,7 @@ from app.clients.redis import create_redis_pool
 from redis.asyncio import Redis
 from app.storage.prediction_storage import PredictionRedisStorage
 from routes.close import router as close_router
-
+from routes.auth import router as auth_router
 from app.storage.moderation_result_storage import ModerationResultRedisStorage
 
 from prometheus_fastapi_instrumentator import Instrumentator
@@ -117,6 +117,7 @@ app.include_router(predict_router)
 app.include_router(async_predict_router)
 app.include_router(moderation_result_router)
 app.include_router(close_router)
+app.include_router(auth_router)
 
 if __name__ == "__main__":
     import uvicorn

@@ -11,7 +11,7 @@ load_dotenv()
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
-    "postgresql://postgres:postgres@localhost:5432/moderation_db",
+    "postgresql://postgres:postgres@localhost:5435/hw",
 )
 
 _pool: asyncpg.Pool | None = None

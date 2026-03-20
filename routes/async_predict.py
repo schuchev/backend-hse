@@ -1,14 +1,15 @@
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Depends
 
 from schemas.async_predict import AsyncPredictRequest, AsyncPredictResponse
 from repositories.items import ItemRepository
 from repositories.moderation_results import ModerationResultRepository
+from dependencies.auth import get_current_account
 
 router = APIRouter(tags=["moderation"])
 
 
 @router.post("/async_predict", response_model=AsyncPredictResponse)
-async def async_predict(payload: AsyncPredictRequest, request: Request) -> AsyncPredictResponse:
+async def async_predict(payload: AsyncPredictRequest, request: Request, account: dict = Depends(get_current_account)) -> AsyncPredictResponse:
 
     producer = request.app.state.kafka_producer
 
